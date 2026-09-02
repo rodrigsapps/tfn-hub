@@ -1,0 +1,1477 @@
+--[[
+============================================================
+    TFN HUB
+    Jogo alvo : Steal An Egg / Roube um Ovo (PlaceId 107778070777162)
+    Interface : WindUI
+    Versao    : 1.0.0
+    Uso       : loadstring(game:HttpGet("URL"))()
+------------------------------------------------------------
+    Feito a partir do dump de remotes do jogo.
+    Todas as chamadas sao protegidas com pcall -> nunca quebra.
+============================================================
+]]
+
+if _G.TFN_HUB_LOADED then
+    if _G.TFN_HUB_NOTIFY then _G.TFN_HUB_NOTIFY("TFN HUB", "O hub ja esta aberto.") end
+    return
+end
+_G.TFN_HUB_LOADED = true
+
+------------------------------------------------------------
+-- SERVICOS
+------------------------------------------------------------
+local Players            = game:GetService("Players")
+local ReplicatedStorage  = game:GetService("ReplicatedStorage")
+local RunService         = game:GetService("RunService")
+local UserInputService    = game:GetService("UserInputService")
+local TweenService       = game:GetService("TweenService")
+local VirtualUser        = game:GetService("VirtualUser")
+local StarterGui         = game:GetService("StarterGui")
+local TeleportService    = game:GetService("TeleportService")
+local HttpService        = game:GetService("HttpService")
+local Workspace          = game:GetService("Workspace")
+local Lighting           = game:GetService("Lighting")
+
+local LocalPlayer = Players.LocalPlayer
+local Camera      = Workspace.CurrentCamera
+
+------------------------------------------------------------
+-- UTIL BASE
+------------------------------------------------------------
+local function try(fn, ...)
+    local ok, res = pcall(fn, ...)
+    if ok then return res end
+    return nil
+end
+
+local function notifyCore(title, text, dur)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {
+            Title = tostring(title),
+            Text = tostring(text),
+            Duration = dur or 4
+        })
+    end)
+end
+
+local function getChar()
+    local c = LocalPlayer.Character
+    if not c then return nil end
+    return c
+end
+
+local function getHRP()
+    local c = getChar()
+    if not c then return nil end
+    return c:FindFirstChild("HumanoidRootPart")
+end
+
+local function getHum()
+    local c = getChar()
+    if not c then return nil end
+    return c:FindFirstChildOfClass("Humanoid")
+end
+
+local function waitChar()
+    local c = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    c:WaitForChild("HumanoidRootPart", 10)
+    return c
+end
+
+------------------------------------------------------------
+-- CAMADA DE REDE (remotes do dump)
+------------------------------------------------------------
+local Net = {}
+Net.folder = nil
+
+function Net:Folder()
+    if self.folder and self.folder.Parent then return self.folder end
+    local pkgs = ReplicatedStorage:FindFirstChild("Packages")
+    if pkgs then
+        local n = pkgs:FindFirstChild("Networking")
+        if n then self.folder = n return n end
+    end
+    -- fallback: procura em qualquer lugar
+    for _, v in ipairs(ReplicatedStorage:GetDescendants()) do
+        if v.Name == "Networking" and (v:IsA("Folder") or v:IsA("Configuration") or v:IsA("Model")) then
+            self.folder = v
+            return v
+        end
+    end
+    return nil
+end
+
+function Net:Get(name)
+    local f = self:Folder()
+    if not f then return nil end
+    local r = f:FindFirstChild(name)
+    if r then return r end
+    -- busca profunda (alguns executores/versoes mudam a hierarquia)
+    for _, v in ipairs(f:GetDescendants()) do
+        if v.Name == name then return v end
+    end
+    return nil
+end
+
+function Net:Fire(name, ...)
+    local r = self:Get(name)
+    if not r then return false end
+    local args = {...}
+    local ok = pcall(function()
+        if r:IsA("RemoteEvent") then
+            r:FireServer(unpack(args))
+        elseif r:IsA("RemoteFunction") then
+            r:InvokeServer(unpack(args))
+        elseif r:IsA("BindableEvent") then
+            r:Fire(unpack(args))
+        end
+    end)
+    return ok
+end
+
+function Net:Invoke(name, ...)
+    local r = self:Get(name)
+    if not r then return nil end
+    local args = {...}
+    local ok, res = pcall(function()
+        if r:IsA("RemoteFunction") then
+            return r:InvokeServer(unpack(args))
+        elseif r:IsA("RemoteEvent") then
+            r:FireServer(unpack(args))
+            return true
+        end
+    end)
+    if ok then return res end
+    return nil
+end
+
+-- nomes dos remotes (extraidos do dump)
+local R = {
+    -- economia / recompensas
+    Coins           = "RE/PenRoster/CoinsGathered",
+    AwayCollect     = "RF/AwayEarnings/AskCollect",
+    AwayPending     = "RF/AwayEarnings/PendingCheck",
+    AwaySummary     = "RF/AwayEarnings/FetchSummary",
+    RedeemAll       = "RF/Codex/AskRedeemAll",
+    Redeem          = "RF/Codex/AskRedeem",
+    RedeemLimited   = "RF/Codex/AskRedeemLimitedEgg",
+    GroupPerk       = "RF/GroupPerk/RedeemPerk",
+    Payouts         = "RE/Payouts/Shower",
+
+    -- pets / mochila
+    SellAllPets     = "RE/PetSatchel/SellEveryPet",
+    SellPet         = "RE/PetSatchel/SellPet",
+    FavPet          = "RE/PetSatchel/WriteFavourite",
+    WearBest        = "RF/Haul/WearBest",
+    WearBestStatus  = "RF/Haul/FetchWearBestStatus",
+    AutoSellWrite   = "RF/Haul/WriteAutoSell",
+    AutoSellFetch   = "RF/Haul/FetchAutoSell",
+    FullSatchelSale = "RF/Haul/OfferFullSatchelSale",
+    PenWear         = "RF/PenRoster/AskWear",
+    PenDoff         = "RF/PenRoster/AskDoff",
+    PenSale         = "RF/PenRoster/AskSale",
+    PenSnapshot     = "RF/PenRoster/AskLiveSnapshot",
+    PenWearLimit    = "RF/PenRoster/AskWearLimit",
+    PenBadgeEquip   = "RF/PenRoster/ConfirmEquipBestBadge",
+    PenBadgePets    = "RF/PenRoster/ConfirmPetsBadge",
+
+    -- ovos
+    EggHatch        = "RF/EggWorld/AskHatch",
+    EggFinishHatch  = "RF/EggWorld/AskFinishHatch",
+    EggSkipGrowth   = "RF/EggWorld/AskSkipGrowth",
+    EggPlace        = "RF/EggWorld/AskPlaceEgg",
+    EggCarry        = "RF/EggWorld/AskFieldEggCarry",
+    EggDrop         = "RF/EggWorld/AskFieldEggDrop",
+    EggSnapshot     = "RF/EggWorld/AskFieldEggSnapshot",
+    EggLive         = "RF/EggWorld/AskLiveSnapshot",
+    EggRecord       = "RF/EggWorld/AskEggRecord",
+    EggWearTool     = "RF/EggWorld/AskWearTool",
+    EggDoffTool     = "RF/EggWorld/AskDoffTool",
+    EggRarities     = "RF/EggWorld/AskFieldEggRarityShows",
+
+    -- base
+    BaseUpgrade     = "RE/Homestead/AskBaseTierRaise",
+    BaseNearbyBuy   = "RE/Homestead/AskNearbyPurchase",
+    BaseState       = "RF/Homestead/AskState",
+    LobbyHop        = "RE/Homestead/AskLobbyHop",
+
+    -- esteira (treadmill)
+    TreadTier       = "RF/Treadmill/AskTierRaise",
+    TreadSpeed      = "RE/Treadmill/SpeedGained",
+    TreadWearStill  = "RF/Treadmill/AskWearStill",
+    TreadDoff       = "RF/Treadmill/AskDoff",
+    TreadSlow       = "RF/Treadmill/AskSlowToggleSet",
+
+    -- eventos
+    Mutate          = "RF/Bloomery/AskMutate",
+    BloomPetal      = "RF/Bloomery/AskGatherPetal",
+    BloomLoadEgg    = "RF/Bloomery/AskLoadEgg",
+    BloomEject      = "RF/Bloomery/AskEjectEgg",
+    BloomConfirm    = "RF/Bloomery/AskBriefingConfirm",
+    BloomStrike     = "RE/Bloomery/AskStrikeTree",
+    FuseBegin       = "RF/Fusery/BeginFuse",
+    FuseLoad        = "RF/Fusery/LoadPet",
+    FuseEject       = "RF/Fusery/EjectPet",
+    FuseFinish      = "RF/Fusery/FinishReveal",
+    FuseConfirm     = "RF/Fusery/ConfirmBriefing",
+    ChestClaim      = "RF/MonsterParasite/AskChestClaim",
+    ChestTake       = "RF/MonsterParasite/AskChestTake",
+    ChestReveal     = "RF/MonsterParasite/AskChestRevealComplete",
+    ParasiteFeed    = "RF/MonsterParasite/AskFeed",
+    ParasiteSnap    = "RF/MonsterParasite/AskSnapshot",
+    MonsterTP       = "RF/MonsterEvent/RequestTeleport",
+    TrialsFetch     = "RF/Trials/Fetch",
+    TrialsRefresh   = "RE/Trials/Refresh",
+    LuckState       = "RF/LuckWindow/FetchState",
+
+    -- gadgets
+    GunFire         = "RE/GunGadget/AskDischarge",
+    LaserFire       = "RE/LaserGadget/AskDischarge",
+    MagnetPull      = "RE/MagnetGadget/AskTug",
+    SwapUse         = "RE/SwapGadget/AskSwap",
+    MegaphoneUse    = "RE/MegaphoneGadget/Rouse",
+    DanceUse        = "RE/DanceGadget/AskDance",
+    BatSwing        = "RE/BatSwing/Trigger",
+    ToolTrigger     = "RE/ToolTrigger/Trigger",
+    TrapPlace       = "RE/TrapPlacement/AskPlace",
+    MinePlace       = "RE/MineTrap/AskPlace",
+
+    -- estado / perfil
+    Profile         = "RF/ProfileMirror/FetchProfile",
+    Reconcile       = "RF/RigSync/Reconcile",
+    Limpness        = "RE/Limpness/WriteLimpness",
+    IdleHop         = "RF/Telemetry/SubmitIdleHop",
+    IdleState       = "RE/Telemetry/SubmitIdleState",
+}
+
+------------------------------------------------------------
+-- ESTADO / CONFIG
+------------------------------------------------------------
+local S = {
+    -- farm
+    autoCoins       = false,
+    autoAway        = false,
+    autoRedeem      = false,
+    autoSellPets    = false,
+    autoEquipBest   = false,
+    autoBase        = false,
+    autoTread       = false,
+    autoTrials      = false,
+    autoPrompt      = false,
+    autoClickTool   = false,
+
+    -- ovos
+    autoHatch       = false,
+    autoFinishHatch = false,
+    autoSkipGrowth  = false,
+    autoCollectEgg  = false,
+    autoStealEgg    = false,
+    autoPlaceEgg    = false,
+    eggRange        = 120,
+
+    -- eventos
+    autoChest       = false,
+    autoMutate      = false,
+    autoPetal       = false,
+
+    -- player
+    walkSpeed       = 16,
+    jumpPower       = 50,
+    speedOn         = false,
+    jumpOn          = false,
+    infJump         = false,
+    noclip          = false,
+    flyOn           = false,
+    flySpeed        = 60,
+    antiTrap        = false,
+    antiAfk         = true,
+    antiRagdoll     = false,
+
+    -- delays
+    delayFarm       = 0.5,
+    delayEgg        = 1,
+
+    -- misc
+    hopMinPlayers   = 1,
+    autoRejoin      = false,
+}
+
+local Threads = {}
+
+-- loop protegido: roda enquanto flag() for verdadeiro
+local function loop(name, flagFn, fn, defDelay)
+    if Threads[name] then return end
+    Threads[name] = true
+    task.spawn(function()
+        while Threads[name] do
+            if flagFn() then
+                pcall(fn)
+            end
+            task.wait(defDelay or 0.5)
+        end
+    end)
+end
+
+------------------------------------------------------------
+-- HELPERS DE MUNDO
+------------------------------------------------------------
+local function tpTo(cf)
+    local hrp = getHRP()
+    if not hrp or not cf then return false end
+    pcall(function() hrp.CFrame = cf end)
+    return true
+end
+
+local function tweenTo(cf, speed)
+    local hrp = getHRP()
+    if not hrp or not cf then return end
+    local dist = (hrp.Position - cf.Position).Magnitude
+    local t = math.clamp(dist / (speed or 120), 0.1, 8)
+    local tw = TweenService:Create(hrp, TweenInfo.new(t, Enum.EasingStyle.Linear), { CFrame = cf })
+    tw:Play()
+    tw.Completed:Wait()
+end
+
+local function firePrompt(p)
+    if typeof(p) ~= "Instance" or not p:IsA("ProximityPrompt") then return end
+    pcall(function()
+        local hold = p.HoldDuration
+        p.HoldDuration = 0
+        if fireproximityprompt then
+            fireproximityprompt(p)
+        else
+            p:InputHoldBegin()
+            task.wait()
+            p:InputHoldEnd()
+        end
+        p.HoldDuration = hold
+    end)
+end
+
+local function promptsNear(radius, filter)
+    local out = {}
+    local hrp = getHRP()
+    if not hrp then return out end
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if v:IsA("ProximityPrompt") and v.Enabled then
+            local part = v.Parent
+            if part and part:IsA("BasePart") then
+                if (part.Position - hrp.Position).Magnitude <= (radius or 40) then
+                    if (not filter) or filter(v) then
+                        table.insert(out, v)
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+local function touchPart(part)
+    local hrp = getHRP()
+    if not hrp or not part or not part:IsA("BasePart") then return end
+    pcall(function()
+        if firetouchinterest then
+            firetouchinterest(hrp, part, 0)
+            task.wait()
+            firetouchinterest(hrp, part, 1)
+        else
+            local old = hrp.CFrame
+            hrp.CFrame = part.CFrame
+            task.wait(0.12)
+            hrp.CFrame = old
+        end
+    end)
+end
+
+local function lowerName(x) return string.lower(tostring(x)) end
+
+local function looksLikeEgg(inst)
+    local n = lowerName(inst.Name)
+    return string.find(n, "egg") ~= nil or string.find(n, "ovo") ~= nil
+end
+
+local function looksLikeCoin(inst)
+    local n = lowerName(inst.Name)
+    return string.find(n, "coin") ~= nil or string.find(n, "cash") ~= nil
+        or string.find(n, "money") ~= nil or string.find(n, "dinheiro") ~= nil
+end
+
+local function partOf(inst)
+    if not inst then return nil end
+    if inst:IsA("BasePart") then return inst end
+    if inst:IsA("Model") then
+        return inst.PrimaryPart or inst:FindFirstChildWhichIsA("BasePart")
+    end
+    return inst:FindFirstChildWhichIsA("BasePart", true)
+end
+
+-- coleta candidatos de ovo no mapa
+local function findEggs(radius)
+    local res = {}
+    local hrp = getHRP()
+    if not hrp then return res end
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        if (v:IsA("Model") or v:IsA("BasePart") or v:IsA("Tool")) and looksLikeEgg(v) then
+            local p = partOf(v)
+            if p and (p.Position - hrp.Position).Magnitude <= (radius or S.eggRange) then
+                table.insert(res, { inst = v, part = p, dist = (p.Position - hrp.Position).Magnitude })
+            end
+        end
+    end
+    table.sort(res, function(a, b) return a.dist < b.dist end)
+    return res
+end
+
+------------------------------------------------------------
+-- ACOES DE FARM
+------------------------------------------------------------
+local Act = {}
+
+function Act.CollectCoins()
+    Net:Fire(R.Coins)
+    -- reforco: prompts e partes de dinheiro proximas
+    for _, p in ipairs(promptsNear(60, function(pr)
+        return looksLikeCoin(pr) or looksLikeCoin(pr.Parent) or looksLikeCoin(pr.ActionText)
+    end)) do
+        firePrompt(p)
+    end
+end
+
+function Act.Away()
+    Net:Invoke(R.AwayCollect)
+end
+
+function Act.RedeemAll()
+    Net:Invoke(R.RedeemAll)
+    Net:Invoke(R.GroupPerk)
+end
+
+function Act.SellPets()
+    Net:Fire(R.SellAllPets)
+    Net:Invoke(R.FullSatchelSale)
+end
+
+function Act.EquipBest()
+    Net:Invoke(R.WearBest)
+    Net:Invoke(R.PenBadgeEquip)
+end
+
+function Act.UpgradeBase()
+    Net:Fire(R.BaseUpgrade)
+    Net:Fire(R.BaseNearbyBuy)
+end
+
+function Act.UpgradeTreadmill()
+    Net:Invoke(R.TreadTier)
+end
+
+function Act.Trials()
+    Net:Fire(R.TrialsRefresh)
+    Net:Invoke(R.TrialsFetch)
+end
+
+function Act.AllPrompts(radius)
+    for _, p in ipairs(promptsNear(radius or 30)) do
+        firePrompt(p)
+    end
+end
+
+function Act.Hatch()
+    Net:Invoke(R.EggHatch)
+    Net:Invoke(R.EggFinishHatch)
+end
+
+function Act.SkipGrowth()
+    Net:Invoke(R.EggSkipGrowth)
+end
+
+function Act.CollectEggsMap()
+    local eggs = findEggs(S.eggRange)
+    for i = 1, math.min(#eggs, 6) do
+        local e = eggs[i]
+        Net:Invoke(R.EggCarry, e.inst)
+        touchPart(e.part)
+        local pr = e.inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+        if pr then firePrompt(pr) end
+        task.wait(0.15)
+    end
+end
+
+function Act.PlaceEgg()
+    Net:Invoke(R.EggPlace)
+    local bp = LocalPlayer:FindFirstChild("Backpack")
+    if bp then
+        for _, t in ipairs(bp:GetChildren()) do
+            if t:IsA("Tool") and looksLikeEgg(t) then
+                Net:Invoke(R.EggWearTool, t)
+                Net:Invoke(R.EggPlace, t)
+            end
+        end
+    end
+end
+
+function Act.Chests()
+    Net:Invoke(R.ChestClaim)
+    Net:Invoke(R.ChestTake)
+    Net:Invoke(R.ChestReveal)
+end
+
+function Act.Mutate()
+    Net:Invoke(R.BloomConfirm)
+    Net:Invoke(R.Mutate)
+end
+
+function Act.Petal()
+    Net:Invoke(R.BloomPetal)
+    Net:Fire(R.BloomStrike)
+end
+
+function Act.UseTool()
+    local char = getChar()
+    if not char then return end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then
+        pcall(function() tool:Activate() end)
+        Net:Fire(R.ToolTrigger, tool)
+        Net:Fire(R.BatSwing, tool)
+    end
+end
+
+------------------------------------------------------------
+-- PLAYER MODS
+------------------------------------------------------------
+local function applySpeed()
+    local h = getHum()
+    if h and S.speedOn then h.WalkSpeed = S.walkSpeed end
+end
+
+local function applyJump()
+    local h = getHum()
+    if not h then return end
+    if S.jumpOn then
+        h.UseJumpPower = true
+        h.JumpPower = S.jumpPower
+    end
+end
+
+RunService.Stepped:Connect(function()
+    if S.speedOn then applySpeed() end
+    if S.jumpOn then applyJump() end
+    if S.noclip then
+        local c = getChar()
+        if c then
+            for _, v in ipairs(c:GetDescendants()) do
+                if v:IsA("BasePart") and v.CanCollide then v.CanCollide = false end
+            end
+        end
+    end
+end)
+
+UserInputService.JumpRequest:Connect(function()
+    if S.infJump then
+        local h = getHum()
+        if h then h:ChangeState(Enum.HumanoidStateType.Jumping) end
+    end
+end)
+
+-- FLY (funciona em PC e mobile)
+local flyBV, flyBG, flyConn
+local flyDir = Vector3.new()
+
+local function stopFly()
+    S.flyOn = false
+    if flyConn then flyConn:Disconnect() flyConn = nil end
+    if flyBV then flyBV:Destroy() flyBV = nil end
+    if flyBG then flyBG:Destroy() flyBG = nil end
+    local h = getHum()
+    if h then h.PlatformStand = false end
+end
+
+local function startFly()
+    local hrp = getHRP()
+    local h = getHum()
+    if not hrp or not h then return end
+    stopFly()
+    S.flyOn = true
+
+    flyBV = Instance.new("BodyVelocity")
+    flyBV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+    flyBV.Velocity = Vector3.new()
+    flyBV.Parent = hrp
+
+    flyBG = Instance.new("BodyGyro")
+    flyBG.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+    flyBG.P = 9e4
+    flyBG.CFrame = Camera.CFrame
+    flyBG.Parent = hrp
+
+    flyConn = RunService.RenderStepped:Connect(function()
+        if not S.flyOn or not flyBV or not flyBV.Parent then return end
+        local dir = Vector3.new()
+        local cf = Camera.CFrame
+        -- teclado
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then dir = dir + cf.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir = dir - cf.LookVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir = dir - cf.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir = dir + cf.RightVector end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir = dir + Vector3.new(0, 1, 0) end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then dir = dir - Vector3.new(0, 1, 0) end
+        -- mobile / analogico
+        local hum = getHum()
+        if hum and hum.MoveDirection.Magnitude > 0 then
+            dir = dir + hum.MoveDirection
+        end
+        if dir.Magnitude > 0 then
+            flyBV.Velocity = dir.Unit * S.flySpeed
+        else
+            flyBV.Velocity = Vector3.new()
+        end
+        flyBG.CFrame = cf
+    end)
+end
+
+-- ANTI TRAP / ANTI RAGDOLL
+loop("antitrap", function() return S.antiTrap end, function()
+    local hrp = getHRP()
+    if not hrp then return end
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        local n = lowerName(v.Name)
+        if (string.find(n, "trap") or string.find(n, "mine") or string.find(n, "armadilha")) then
+            local p = partOf(v)
+            if p and (p.Position - hrp.Position).Magnitude < 25 then
+                pcall(function() p.CanTouch = false p.CanCollide = false end)
+            end
+        end
+    end
+end, 0.4)
+
+loop("antiragdoll", function() return S.antiRagdoll end, function()
+    local h = getHum()
+    if not h then return end
+    pcall(function()
+        h:ChangeState(Enum.HumanoidStateType.GettingUp)
+        h.PlatformStand = false
+        h.Sit = false
+    end)
+    Net:Fire(R.Limpness, false)
+end, 0.3)
+
+-- ANTI AFK
+task.spawn(function()
+    local ok = pcall(function()
+        LocalPlayer.Idled:Connect(function()
+            if not S.antiAfk then return end
+            pcall(function()
+                VirtualUser:CaptureController()
+                VirtualUser:ClickButton2(Vector2.new())
+            end)
+        end)
+    end)
+    if not ok then return end
+end)
+
+------------------------------------------------------------
+-- LOOPS DE FARM
+------------------------------------------------------------
+loop("coins",     function() return S.autoCoins end,       Act.CollectCoins,     0.4)
+loop("away",      function() return S.autoAway end,        Act.Away,             8)
+loop("redeem",    function() return S.autoRedeem end,      Act.RedeemAll,        10)
+loop("sell",      function() return S.autoSellPets end,    Act.SellPets,         3)
+loop("equip",     function() return S.autoEquipBest end,   Act.EquipBest,        5)
+loop("base",      function() return S.autoBase end,        Act.UpgradeBase,      2)
+loop("tread",     function() return S.autoTread end,       Act.UpgradeTreadmill, 2)
+loop("trials",    function() return S.autoTrials end,      Act.Trials,           10)
+loop("prompts",   function() return S.autoPrompt end,      function() Act.AllPrompts(35) end, 0.5)
+loop("tool",      function() return S.autoClickTool end,   Act.UseTool,          0.1)
+loop("hatch",     function() return S.autoHatch end,       Act.Hatch,            1)
+loop("skip",      function() return S.autoSkipGrowth end,  Act.SkipGrowth,       2)
+loop("eggmap",    function() return S.autoCollectEgg end,  Act.CollectEggsMap,   1)
+loop("placeegg",  function() return S.autoPlaceEgg end,    Act.PlaceEgg,         2)
+loop("chest",     function() return S.autoChest end,       Act.Chests,           3)
+loop("mutate",    function() return S.autoMutate end,      Act.Mutate,           4)
+loop("petal",     function() return S.autoPetal end,       Act.Petal,            1.5)
+
+-- auto roubar ovos de outras bases
+loop("steal", function() return S.autoStealEgg end, function()
+    local hrp = getHRP()
+    if not hrp then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and S.autoStealEgg then
+            local ch = plr.Character
+            local ohrp = ch and ch:FindFirstChild("HumanoidRootPart")
+            if ohrp then
+                local eggs = findEggs(9999)
+                for i = 1, math.min(#eggs, 3) do
+                    local e = eggs[i]
+                    if (e.part.Position - ohrp.Position).Magnitude < 90 then
+                        tpTo(e.part.CFrame * CFrame.new(0, 3, 0))
+                        task.wait(0.25)
+                        Net:Invoke(R.EggCarry, e.inst)
+                        local pr = e.inst:FindFirstChildWhichIsA("ProximityPrompt", true)
+                        if pr then firePrompt(pr) end
+                        task.wait(0.25)
+                    end
+                end
+            end
+        end
+    end
+end, 2)
+
+------------------------------------------------------------
+-- SERVIDOR
+------------------------------------------------------------
+local function serverHop()
+    local placeId = game.PlaceId
+    local ok = pcall(function()
+        local url = "https://games.roblox.com/v1/games/" .. placeId ..
+            "/servers/Public?sortOrder=Asc&limit=100"
+        local req = (syn and syn.request) or (http and http.request) or http_request or request
+        local body
+        if req then
+            local r = req({ Url = url, Method = "GET" })
+            body = r.Body
+        else
+            body = game:HttpGet(url)
+        end
+        local data = HttpService:JSONDecode(body)
+        local list = {}
+        for _, s in ipairs(data.data or {}) do
+            if s.playing and s.maxPlayers and s.playing < s.maxPlayers and s.id ~= game.JobId then
+                table.insert(list, s.id)
+            end
+        end
+        if #list > 0 then
+            TeleportService:TeleportToPlaceInstance(placeId, list[math.random(1, #list)], LocalPlayer)
+        else
+            TeleportService:Teleport(placeId, LocalPlayer)
+        end
+    end)
+    if not ok then
+        pcall(function() TeleportService:Teleport(game.PlaceId, LocalPlayer) end)
+    end
+end
+
+local function rejoin()
+    pcall(function()
+        TeleportService:TeleportToPlaceInstance(game.PlaceId, game.JobId, LocalPlayer)
+    end)
+end
+
+-- auto rejoin em shutdown
+pcall(function()
+    local ev = Net:Get("RE/Lifecycle/BeginShutdown")
+    if ev and ev:IsA("RemoteEvent") then
+        ev.OnClientEvent:Connect(function()
+            if S.autoRejoin then rejoin() end
+        end)
+    end
+end)
+
+------------------------------------------------------------
+-- FPS BOOST
+------------------------------------------------------------
+local boosted = false
+local function fpsBoost()
+    if boosted then return end
+    boosted = true
+    pcall(function()
+        for _, v in ipairs(Workspace:GetDescendants()) do
+            if v:IsA("BasePart") and not v:IsDescendantOf(LocalPlayer.Character or game) then
+                v.Material = Enum.Material.SmoothPlastic
+                v.Reflectance = 0
+            elseif v:IsA("Decal") or v:IsA("Texture") then
+                v.Transparency = 1
+            elseif v:IsA("ParticleEmitter") or v:IsA("Trail") or v:IsA("Smoke")
+                or v:IsA("Fire") or v:IsA("Sparkles") or v:IsA("Explosion") then
+                v.Enabled = false
+            end
+        end
+        Lighting.GlobalShadows = false
+        Lighting.FogEnd = 9e9
+        for _, v in ipairs(Lighting:GetChildren()) do
+            if v:IsA("BlurEffect") or v:IsA("SunRaysEffect") or v:IsA("ColorCorrectionEffect")
+                or v:IsA("BloomEffect") or v:IsA("DepthOfFieldEffect") then
+                v.Enabled = false
+            end
+        end
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+    end)
+end
+
+------------------------------------------------------------
+-- TELEPORTES
+------------------------------------------------------------
+local function findByKeywords(words)
+    local best
+    for _, v in ipairs(Workspace:GetDescendants()) do
+        local n = lowerName(v.Name)
+        for _, w in ipairs(words) do
+            if string.find(n, w) then
+                local p = partOf(v)
+                if p then best = p break end
+            end
+        end
+        if best then break end
+    end
+    return best
+end
+
+local function tpKeyword(words, label)
+    local p = findByKeywords(words)
+    if p then
+        tpTo(p.CFrame * CFrame.new(0, 4, 0))
+        return true
+    end
+    notifyCore("TFN HUB", "Nao encontrei: " .. tostring(label))
+    return false
+end
+
+local function myBase()
+    local plots = Workspace:FindFirstChild("Plots") or Workspace:FindFirstChild("Bases")
+        or Workspace:FindFirstChild("Homesteads")
+    if plots then
+        for _, plot in ipairs(plots:GetChildren()) do
+            for _, d in ipairs(plot:GetDescendants()) do
+                if d:IsA("StringValue") or d:IsA("ObjectValue") then
+                    local val = tostring(d.Value)
+                    if val == LocalPlayer.Name or val == LocalPlayer.DisplayName then
+                        return partOf(plot)
+                    end
+                end
+                if d:IsA("TextLabel") and string.find(lowerName(d.Text), lowerName(LocalPlayer.Name)) then
+                    return partOf(plot)
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function tpPlayer(name)
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer and (plr.Name == name or plr.DisplayName == name) then
+            local ch = plr.Character
+            local h = ch and ch:FindFirstChild("HumanoidRootPart")
+            if h then
+                tpTo(h.CFrame * CFrame.new(0, 0, 3))
+                return true
+            end
+        end
+    end
+    notifyCore("TFN HUB", "Jogador nao encontrado / sem personagem.")
+    return false
+end
+
+local function playerList()
+    local t = {}
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then table.insert(t, plr.Name) end
+    end
+    if #t == 0 then table.insert(t, "-- ninguem --") end
+    return t
+end
+
+------------------------------------------------------------
+-- INTERFACE (WindUI)
+------------------------------------------------------------
+local WindUI
+local okUI = pcall(function()
+    WindUI = loadstring(game:HttpGet(
+        "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+end)
+
+if not okUI or not WindUI then
+    notifyCore("TFN HUB", "Falha ao carregar a UI (WindUI). Tentando espelho...")
+    pcall(function()
+        WindUI = loadstring(game:HttpGet(
+            "https://raw.githubusercontent.com/Footagesus/WindUI/main/dist/main.lua"))()
+    end)
+end
+
+if not WindUI then
+    notifyCore("TFN HUB", "Sem internet para a UI. Abortando.")
+    _G.TFN_HUB_LOADED = false
+    return
+end
+
+_G.TFN_HUB_NOTIFY = function(t, c)
+    pcall(function() WindUI:Notify({ Title = t, Content = c, Duration = 4 }) end)
+end
+
+local function Notify(t, c, d)
+    pcall(function()
+        WindUI:Notify({ Title = t or "TFN HUB", Content = c or "", Duration = d or 4 })
+    end)
+end
+
+local Window = WindUI:CreateWindow({
+    Title      = "TFN HUB",
+    Icon       = "egg",
+    Author     = "Steal An Egg | v1.0.0",
+    Folder     = "TFNHub",
+    Size       = UDim2.fromOffset(560, 420),
+    Transparent = true,
+    Theme      = "Dark",
+    SideBarWidth = 170,
+})
+
+pcall(function()
+    Window:EditOpenButton({
+        Title = "TFN HUB",
+        Icon = "egg",
+        CornerRadius = UDim.new(0, 14),
+        Draggable = true,
+    })
+end)
+
+pcall(function() Window:Tag({ Title = "v1.0.0", Color = Color3.fromHex("#30ff6a") }) end)
+
+------------------------------------------------------------
+-- ABA: PRINCIPAL
+------------------------------------------------------------
+local TabMain = Window:Tab({ Title = "Principal", Icon = "house" })
+
+TabMain:Paragraph({
+    Title = "TFN HUB",
+    Desc  = "Hub para Steal An Egg (Roube um Ovo).\nTodas as funcoes usam os remotes reais do jogo.\nSe algo nao responder, o jogo atualizou o remote."
+})
+
+TabMain:Section({ Title = "Status" })
+
+local infoPara = TabMain:Paragraph({
+    Title = "Informacoes",
+    Desc  = "Carregando..."
+})
+
+task.spawn(function()
+    while task.wait(2) do
+        local net = Net:Folder()
+        local txt = "Jogador: " .. LocalPlayer.Name ..
+            "\nJogadores: " .. #Players:GetPlayers() .. "/" .. Players.MaxPlayers ..
+            "\nRemotes: " .. (net and "OK (" .. #net:GetChildren() .. ")" or "NAO ENCONTRADO") ..
+            "\nPing: " .. tostring(math.floor(
+                (try(function() return LocalPlayer:GetNetworkPing() * 1000 end) or 0))) .. " ms"
+        pcall(function() infoPara:SetDesc(txt) end)
+    end
+end)
+
+TabMain:Section({ Title = "Atalhos rapidos" })
+
+TabMain:Button({
+    Title = "Coletar Tudo Agora",
+    Desc  = "Dinheiro + offline + recompensas + prompts",
+    Callback = function()
+        Act.CollectCoins(); Act.Away(); Act.RedeemAll(); Act.AllPrompts(60)
+        Notify("TFN HUB", "Coleta executada.")
+    end
+})
+
+TabMain:Button({
+    Title = "Vender Pets + Equipar Melhores",
+    Callback = function()
+        Act.SellPets(); task.wait(0.3); Act.EquipBest()
+        Notify("TFN HUB", "Pets vendidos e melhores equipados.")
+    end
+})
+
+TabMain:Button({
+    Title = "Melhorar Base + Esteira",
+    Callback = function()
+        Act.UpgradeBase(); Act.UpgradeTreadmill()
+        Notify("TFN HUB", "Upgrades enviados.")
+    end
+})
+
+------------------------------------------------------------
+-- ABA: FARM
+------------------------------------------------------------
+local TabFarm = Window:Tab({ Title = "Farm", Icon = "coins" })
+
+TabFarm:Section({ Title = "Dinheiro" })
+
+TabFarm:Toggle({
+    Title = "Auto Coletar Dinheiro",
+    Desc  = "RE/PenRoster/CoinsGathered + prompts de coin",
+    Value = false,
+    Callback = function(v) S.autoCoins = v end
+})
+
+TabFarm:Toggle({
+    Title = "Auto Ganhos Offline",
+    Desc  = "RF/AwayEarnings/AskCollect",
+    Value = false,
+    Callback = function(v) S.autoAway = v end
+})
+
+TabFarm:Toggle({
+    Title = "Auto Resgatar Recompensas",
+    Desc  = "Codex + perk de grupo",
+    Value = false,
+    Callback = function(v) S.autoRedeem = v end
+})
+
+TabFarm:Section({ Title = "Pets" })
+
+TabFarm:Toggle({
+    Title = "Auto Vender Pets",
+    Value = false,
+    Callback = function(v) S.autoSellPets = v end
+})
+
+TabFarm:Toggle({
+    Title = "Auto Equipar Melhores Pets",
+    Value = false,
+    Callback = function(v) S.autoEquipBest = v end
+})
+
+TabFarm:Button({
+    Title = "Ativar Auto-Sell do Jogo",
+    Callback = function()
+        Net:Invoke(R.AutoSellWrite, true)
+        Notify("TFN HUB", "Auto-sell nativo ativado.")
+    end
+})
+
+TabFarm:Button({
+    Title = "Desativar Auto-Sell do Jogo",
+    Callback = function()
+        Net:Invoke(R.AutoSellWrite, false)
+        Notify("TFN HUB", "Auto-sell nativo desativado.")
+    end
+})
+
+TabFarm:Section({ Title = "Upgrades" })
+
+TabFarm:Toggle({
+    Title = "Auto Melhorar Base",
+    Value = false,
+    Callback = function(v) S.autoBase = v end
+})
+
+TabFarm:Toggle({
+    Title = "Auto Melhorar Esteira",
+    Value = false,
+    Callback = function(v) S.autoTread = v end
+})
+
+TabFarm:Toggle({
+    Title = "Auto Missoes (Trials)",
+    Value = false,
+    Callback = function(v) S.autoTrials = v end
+})
+
+TabFarm:Section({ Title = "Geral" })
+
+TabFarm:Toggle({
+    Title = "Auto Interagir (ProximityPrompt)",
+    Desc  = "Aperta tudo que estiver perto",
+    Value = false,
+    Callback = function(v) S.autoPrompt = v end
+})
+
+TabFarm:Toggle({
+    Title = "Auto Usar Ferramenta (clicker)",
+    Desc  = "Ativa a tool equipada sem parar",
+    Value = false,
+    Callback = function(v) S.autoClickTool = v end
+})
+
+------------------------------------------------------------
+-- ABA: OVOS
+------------------------------------------------------------
+local TabEgg = Window:Tab({ Title = "Ovos", Icon = "egg" })
+
+TabEgg:Section({ Title = "Chocar" })
+
+TabEgg:Toggle({
+    Title = "Auto Chocar Ovos",
+    Desc  = "AskHatch + AskFinishHatch",
+    Value = false,
+    Callback = function(v) S.autoHatch = v end
+})
+
+TabEgg:Toggle({
+    Title = "Auto Pular Crescimento",
+    Desc  = "AskSkipGrowth",
+    Value = false,
+    Callback = function(v) S.autoSkipGrowth = v end
+})
+
+TabEgg:Section({ Title = "Mapa" })
+
+TabEgg:Toggle({
+    Title = "Auto Pegar Ovos do Mapa",
+    Value = false,
+    Callback = function(v) S.autoCollectEgg = v end
+})
+
+TabEgg:Toggle({
+    Title = "Auto Roubar Ovos (outros jogadores)",
+    Desc  = "Vai ate a base dos outros e pega",
+    Value = false,
+    Callback = function(v) S.autoStealEgg = v end
+})
+
+TabEgg:Toggle({
+    Title = "Auto Colocar Ovo na Base",
+    Value = false,
+    Callback = function(v) S.autoPlaceEgg = v end
+})
+
+TabEgg:Slider({
+    Title = "Distancia de busca",
+    Step = 10,
+    Value = { Min = 30, Max = 500, Default = 120 },
+    Callback = function(v)
+        if type(v) == "table" then v = v.Value or v[1] end
+        S.eggRange = tonumber(v) or 120
+    end
+})
+
+TabEgg:Button({
+    Title = "Listar Ovos Proximos",
+    Callback = function()
+        local e = findEggs(S.eggRange)
+        Notify("TFN HUB", "Ovos encontrados: " .. #e)
+    end
+})
+
+TabEgg:Button({
+    Title = "Ir ate o Ovo mais Proximo",
+    Callback = function()
+        local e = findEggs(9999)
+        if e[1] then
+            tpTo(e[1].part.CFrame * CFrame.new(0, 4, 0))
+        else
+            Notify("TFN HUB", "Nenhum ovo encontrado.")
+        end
+    end
+})
+
+TabEgg:Button({
+    Title = "Soltar Ovo",
+    Callback = function() Net:Invoke(R.EggDrop) end
+})
+
+------------------------------------------------------------
+-- ABA: EVENTOS
+------------------------------------------------------------
+local TabEvent = Window:Tab({ Title = "Eventos", Icon = "sparkles" })
+
+TabEvent:Section({ Title = "Automatico" })
+
+TabEvent:Toggle({
+    Title = "Auto Bau (Monster/Parasite)",
+    Value = false,
+    Callback = function(v) S.autoChest = v end
+})
+
+TabEvent:Toggle({
+    Title = "Auto Mutacao (Bloomery)",
+    Value = false,
+    Callback = function(v) S.autoMutate = v end
+})
+
+TabEvent:Toggle({
+    Title = "Auto Coletar Petalas",
+    Value = false,
+    Callback = function(v) S.autoPetal = v end
+})
+
+TabEvent:Section({ Title = "Manual" })
+
+TabEvent:Button({ Title = "Fusionar Pets (Fusery)", Callback = function()
+    Net:Invoke(R.FuseConfirm); Net:Invoke(R.FuseBegin); Net:Invoke(R.FuseFinish)
+    Notify("TFN HUB", "Fusao solicitada.")
+end })
+
+TabEvent:Button({ Title = "Alimentar Monstro", Callback = function()
+    Net:Invoke(R.ParasiteFeed)
+end })
+
+TabEvent:Button({ Title = "Teleporte do Evento Monstro", Callback = function()
+    Net:Invoke(R.MonsterTP)
+end })
+
+TabEvent:Button({ Title = "Ver Sorte (Luck)", Callback = function()
+    local st = Net:Invoke(R.LuckState)
+    Notify("TFN HUB", "Luck: " .. tostring(st))
+end })
+
+------------------------------------------------------------
+-- ABA: PLAYER
+------------------------------------------------------------
+local TabPlayer = Window:Tab({ Title = "Player", Icon = "user" })
+
+TabPlayer:Section({ Title = "Movimento" })
+
+TabPlayer:Toggle({
+    Title = "Velocidade Custom",
+    Value = false,
+    Callback = function(v)
+        S.speedOn = v
+        if not v then local h = getHum() if h then h.WalkSpeed = 16 end end
+    end
+})
+
+TabPlayer:Slider({
+    Title = "WalkSpeed",
+    Step = 1,
+    Value = { Min = 16, Max = 300, Default = 16 },
+    Callback = function(v)
+        if type(v) == "table" then v = v.Value or v[1] end
+        S.walkSpeed = tonumber(v) or 16
+        applySpeed()
+    end
+})
+
+TabPlayer:Toggle({
+    Title = "Pulo Custom",
+    Value = false,
+    Callback = function(v)
+        S.jumpOn = v
+        if not v then local h = getHum() if h then h.JumpPower = 50 end end
+    end
+})
+
+TabPlayer:Slider({
+    Title = "JumpPower",
+    Step = 5,
+    Value = { Min = 50, Max = 400, Default = 50 },
+    Callback = function(v)
+        if type(v) == "table" then v = v.Value or v[1] end
+        S.jumpPower = tonumber(v) or 50
+        applyJump()
+    end
+})
+
+TabPlayer:Toggle({
+    Title = "Pulo Infinito",
+    Value = false,
+    Callback = function(v) S.infJump = v end
+})
+
+TabPlayer:Toggle({
+    Title = "Noclip (atravessar paredes)",
+    Value = false,
+    Callback = function(v) S.noclip = v end
+})
+
+TabPlayer:Toggle({
+    Title = "Voar",
+    Value = false,
+    Callback = function(v)
+        if v then startFly() else stopFly() end
+    end
+})
+
+TabPlayer:Slider({
+    Title = "Velocidade do Voo",
+    Step = 5,
+    Value = { Min = 20, Max = 300, Default = 60 },
+    Callback = function(v)
+        if type(v) == "table" then v = v.Value or v[1] end
+        S.flySpeed = tonumber(v) or 60
+    end
+})
+
+TabPlayer:Section({ Title = "Protecao" })
+
+TabPlayer:Toggle({
+    Title = "Anti Armadilha",
+    Value = false,
+    Callback = function(v) S.antiTrap = v end
+})
+
+TabPlayer:Toggle({
+    Title = "Anti Ragdoll / Tontura",
+    Value = false,
+    Callback = function(v) S.antiRagdoll = v end
+})
+
+TabPlayer:Toggle({
+    Title = "Anti AFK",
+    Value = true,
+    Callback = function(v) S.antiAfk = v end
+})
+
+TabPlayer:Button({
+    Title = "Resetar Personagem",
+    Callback = function()
+        local h = getHum()
+        if h then h.Health = 0 end
+    end
+})
+
+------------------------------------------------------------
+-- ABA: TELEPORTE
+------------------------------------------------------------
+local TabTP = Window:Tab({ Title = "Teleporte", Icon = "map-pin" })
+
+TabTP:Section({ Title = "Locais" })
+
+TabTP:Button({ Title = "Minha Base", Callback = function()
+    local p = myBase()
+    if p then tpTo(p.CFrame * CFrame.new(0, 6, 0))
+    else tpKeyword({ "plot", "base", "homestead" }, "base") end
+end })
+
+TabTP:Button({ Title = "Esteira (Treadmill)", Callback = function()
+    tpKeyword({ "treadmill", "esteira", "belt" }, "esteira")
+end })
+
+TabTP:Button({ Title = "Loja", Callback = function()
+    tpKeyword({ "shop", "store", "loja", "storefront" }, "loja")
+end })
+
+TabTP:Button({ Title = "Fusery (Fusao)", Callback = function()
+    tpKeyword({ "fuse", "fusery" }, "fusery")
+end })
+
+TabTP:Button({ Title = "Bloomery (Mutacao)", Callback = function()
+    tpKeyword({ "bloom", "bloomery", "tree" }, "bloomery")
+end })
+
+TabTP:Button({ Title = "Spawn", Callback = function()
+    local sp = Workspace:FindFirstChildWhichIsA("SpawnLocation", true)
+    if sp then tpTo(sp.CFrame * CFrame.new(0, 4, 0)) end
+end })
+
+TabTP:Section({ Title = "Jogadores" })
+
+local selectedPlayer = nil
+local dropPlayers = TabTP:Dropdown({
+    Title = "Escolher Jogador",
+    Values = playerList(),
+    Value = nil,
+    Callback = function(v)
+        if type(v) == "table" then v = v[1] end
+        selectedPlayer = v
+    end
+})
+
+TabTP:Button({ Title = "Atualizar Lista", Callback = function()
+    pcall(function() dropPlayers:Refresh(playerList()) end)
+    pcall(function() dropPlayers:SetValues(playerList()) end)
+    Notify("TFN HUB", "Lista atualizada.")
+end })
+
+TabTP:Button({ Title = "Ir ate o Jogador", Callback = function()
+    if selectedPlayer then tpPlayer(selectedPlayer)
+    else Notify("TFN HUB", "Escolha um jogador primeiro.") end
+end })
+
+TabTP:Button({ Title = "Salvar Posicao", Callback = function()
+    local hrp = getHRP()
+    if hrp then _G.TFN_SAVED_CF = hrp.CFrame Notify("TFN HUB", "Posicao salva.") end
+end })
+
+TabTP:Button({ Title = "Voltar a Posicao Salva", Callback = function()
+    if _G.TFN_SAVED_CF then tpTo(_G.TFN_SAVED_CF)
+    else Notify("TFN HUB", "Nenhuma posicao salva.") end
+end })
+
+------------------------------------------------------------
+-- ABA: SERVIDOR
+------------------------------------------------------------
+local TabServer = Window:Tab({ Title = "Servidor", Icon = "server" })
+
+TabServer:Button({ Title = "Server Hop", Callback = function()
+    Notify("TFN HUB", "Procurando outro servidor...")
+    serverHop()
+end })
+
+TabServer:Button({ Title = "Rejoin", Callback = function() rejoin() end })
+
+TabServer:Toggle({
+    Title = "Auto Rejoin em Shutdown",
+    Value = false,
+    Callback = function(v) S.autoRejoin = v end
+})
+
+TabServer:Button({ Title = "Trocar de Lobby (in-game)", Callback = function()
+    Net:Fire(R.LobbyHop)
+end })
+
+TabServer:Section({ Title = "Performance" })
+
+TabServer:Button({ Title = "FPS Boost", Callback = function()
+    fpsBoost()
+    Notify("TFN HUB", "FPS Boost aplicado.")
+end })
+
+TabServer:Button({ Title = "Copiar JobId", Callback = function()
+    pcall(function() (setclipboard or toclipboard or writeclipboard)(game.JobId) end)
+    Notify("TFN HUB", "JobId copiado.")
+end })
+
+------------------------------------------------------------
+-- ABA: CONFIG
+------------------------------------------------------------
+local TabCfg = Window:Tab({ Title = "Config", Icon = "settings" })
+
+TabCfg:Section({ Title = "Interface" })
+
+TabCfg:Keybind({
+    Title = "Tecla para Abrir/Fechar",
+    Value = "RightShift",
+    Callback = function(k)
+        pcall(function() Window:SetToggleKey(Enum.KeyCode[k] or Enum.KeyCode.RightShift) end)
+    end
+})
+
+TabCfg:Dropdown({
+    Title = "Tema",
+    Values = { "Dark", "Light", "Midnight", "Rose", "Plant" },
+    Value = "Dark",
+    Callback = function(v)
+        if type(v) == "table" then v = v[1] end
+        pcall(function() WindUI:SetTheme(v) end)
+    end
+})
+
+TabCfg:Button({
+    Title = "Desligar Tudo",
+    Desc  = "Para todos os automaticos",
+    Callback = function()
+        for k, v in pairs(S) do
+            if type(v) == "boolean" then S[k] = false end
+        end
+        S.antiAfk = true
+        stopFly()
+        Notify("TFN HUB", "Todos os automaticos desligados.")
+    end
+})
+
+TabCfg:Button({
+    Title = "Fechar Hub",
+    Callback = function()
+        for k in pairs(Threads) do Threads[k] = nil end
+        stopFly()
+        _G.TFN_HUB_LOADED = false
+        pcall(function() Window:Close() end)
+    end
+})
+
+TabCfg:Section({ Title = "Sobre" })
+
+TabCfg:Paragraph({
+    Title = "TFN HUB v1.0.0",
+    Desc  = "Base: dump de remotes de Steal An Egg.\nUI: WindUI.\nCompativel com Delta, Codex, Arceus X, Solara, Fluxus, Xeno, Wave e Synapse."
+})
+
+------------------------------------------------------------
+-- FINAL
+------------------------------------------------------------
+Window:SelectTab(1)
+
+LocalPlayer.CharacterAdded:Connect(function()
+    task.wait(1.2)
+    applySpeed()
+    applyJump()
+    if S.flyOn then startFly() end
+end)
+
+Notify("TFN HUB", "Carregado com sucesso. Bom jogo, " .. LocalPlayer.Name .. "!", 6)
+notifyCore("TFN HUB", "Carregado.")
